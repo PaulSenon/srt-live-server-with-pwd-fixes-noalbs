@@ -161,7 +161,7 @@ int CSLSSrt::libsrt_setup(int port)
 
     m_sc.port = port;
 
-    hints.ai_family = AF_INET;//AF_UNSPEC;
+    hints.ai_family = AF_INET6;//AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
     snprintf(portstr, sizeof(portstr), "%d", s->port);
     hints.ai_flags |= AI_PASSIVE;
@@ -187,6 +187,12 @@ int CSLSSrt::libsrt_setup(int port)
         return ret;
     }
 */
+
+    int enable = 0;
+    int lossmaxttlvalue = 40;
+
+    srt_setsockopt(fd, SOL_SOCKET, SRTO_IPV6ONLY, &enable, sizeof(enable));
+    srt_setsockopt(fd, SOL_SOCKET, SRTO_LOSSMAXTTL, &lossmaxttlvalue, sizeof(lossmaxttlvalue));
 
     /* Set the socket's send or receive buffer sizes, if specified.
        If unspecified or setting fails, system default is used. */
@@ -230,12 +236,20 @@ int CSLSSrt::libsrt_listen(int backlog)
     return SLS_OK;
 }
 
+int CSLSSrt::libsrt_set_listen_callback(srt_listen_callback_fn * listen_callback_fn) {
+    int ret = srt_listen_callback(m_sc.fd, listen_callback_fn, NULL);
+    if (ret) {
+        return SLS_ERROR;
+    }
+    return SLS_OK;
+}
+
 int CSLSSrt::libsrt_accept()
 {
-    struct sockaddr_in scl;
+    struct sockaddr_in6 scl;
     int sclen = sizeof(scl);
-    char ip[30] = {0};
-    struct sockaddr_in * addrtmp;
+    char ip[INET6_ADDRSTRLEN] = {0};
+    struct sockaddr_in6 * addrtmp;
 
     int new_sock = srt_accept(m_sc.fd, (struct sockaddr*)&scl, &sclen);//NULL, NULL);//(sockaddr*)&scl, &sclen);
     if (new_sock == SRT_INVALID_SOCK) {
@@ -244,10 +258,10 @@ int CSLSSrt::libsrt_accept()
                    this, m_sc.fd, err_no);
         return SLS_ERROR;
     }
-    addrtmp = (struct sockaddr_in *)&scl;
-    inet_ntop(AF_INET, &addrtmp->sin_addr, ip, sizeof(ip));
+    addrtmp = (struct sockaddr_in6 *)&scl;
+    inet_ntop(AF_INET6, &addrtmp->sin6_addr, ip, INET6_ADDRSTRLEN);
     sls_log(SLS_LOG_INFO, "[%p]CSLSSrt::libsrt_accept ok, new sock=%d, %s:%d.",
-               this, new_sock, ip, ntohs(addrtmp->sin_port));
+               this, new_sock, ip, ntohs(addrtmp->sin6_port));
 
     return new_sock;
 }
@@ -307,6 +321,35 @@ int CSLSSrt::libsrt_socket_nonblock(int enable)
     if (ret < 0)
         return ret;
     return srt_setsockopt(m_sc.fd, 0, SRTO_RCVSYN, &enable, sizeof(enable));
+}
+
+std::map<std::string, std::string> CSLSSrt::libsrt_parse_sid(char *sid)
+{
+    static const char stdhdr [] = "#!::";
+    uint32_t* pattern = (uint32_t*)stdhdr;
+    std::map<std::string, std::string> ret;
+    if (strlen(sid) > 4 && *(uint32_t*)sid == *pattern) {
+        std::vector<string> items;
+        sls_split_string(sid+4, ",", items);
+        for (auto& i: items) {
+            std::vector<string> kv;
+            sls_split_string(i, "=", kv);
+            if (kv.size() == 2)
+            {
+
+                ret[kv.at(0)] = kv.at(1);
+            }
+        }
+    } else {
+        std::vector<string> items;
+        sls_split_string(sid, "/", items);
+        if (items.size() >= 3) {
+            ret["h"] = items.at(0);
+            ret["sls_app"] = items.at(1);
+            ret["r"] = items.at(2);
+        }
+    }
+    return ret;
 }
 
 int CSLSSrt::libsrt_split_sid(char *sid, char *host, char *app, char *name)
@@ -413,14 +456,14 @@ int  CSLSSrt::libsrt_getsockstate()
 int CSLSSrt::libsrt_getpeeraddr(char * peer_name, int& port)
 {
     int ret = SLS_ERROR;
-    struct sockaddr_in peer_addr;
+    struct sockaddr_in6 peer_addr;
     int peer_addr_len = sizeof(peer_addr);
 
     if (strlen(m_peer_name) == 0 || m_peer_port == 0) {
         ret = srt_getpeername(m_sc.fd, (struct sockaddr *)&peer_addr, &peer_addr_len);
         if (0 == ret) {
-            inet_ntop(AF_INET, &peer_addr.sin_addr, m_peer_name, sizeof(m_peer_name));
-            m_peer_port = ntohs(peer_addr.sin_port);
+            inet_ntop(AF_INET6, &peer_addr.sin6_addr, m_peer_name, sizeof(m_peer_name));
+            m_peer_port = ntohs(peer_addr.sin6_port);
 
             strcpy(peer_name, m_peer_name);
             port = m_peer_port;
@@ -434,3 +477,10 @@ int CSLSSrt::libsrt_getpeeraddr(char * peer_name, int& port)
     return ret;
 }
 
+int CSLSSrt::libsrt_get_statistics(SRT_TRACEBSTATS *currentStats, int clear) {
+    int result = srt_bistats(m_sc.fd, currentStats, clear, 1);
+    if (result == SLS_ERROR) {
+        return SLS_ERROR;
+    }
+    return SLS_OK;
+}

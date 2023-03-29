@@ -26,12 +26,17 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <httplib.h>
 
 using namespace std;
+using namespace httplib;
 
+#include "json.hpp"
 #include "SLSLog.hpp"
 #include "SLSManager.hpp"
 #include "HttpClient.hpp"
+
+using json = nlohmann::json;
 
 /*
  * ctrl + c controller
@@ -42,25 +47,32 @@ static void ctrl_c_handler(int s){
     b_exit = true;
 }
 
-
 static bool b_reload = 0;
 static void reload_handler(int s){
     printf("\ncaught signal %d, reload.\n",s);
     b_reload = true;
 }
 
+Server svr;
+
 /**
  * usage information
  */
 #define SLS_MAJOR_VERSION "1"
 #define SLS_MIN_VERSION "4"
-#define SLS_TEST_VERSION "x"
+#define SLS_TEST_VERSION "8"
+#define SLS_SUB_VERSION "-b"
 static void usage()
 {
-    printf("-------------------------------------------------\n");
-    printf("           srt-live-srver \n");
-    printf("                    v%s.%s.%s \n", SLS_MAJOR_VERSION, SLS_MIN_VERSION, SLS_TEST_VERSION);
-    printf("-------------------------------------------------\n");
+    printf("--------------------------------------------------------\n");
+    printf(">> SRT-LIVE-SERVER \n");
+    printf(">> v1.4.8-b \n");
+    printf(">> with SRTLA Hotfix + anders-d/srt-live-server \n");
+    printf(">> Get NOALBS @ b3ck.com/noalbs \n");
+    printf(">> Special Thanks to oozebrood, matthewwb2 and kyle___d \n");
+    printf(">> Checkout irl.wiki for the best IRL resources online! \n");
+    printf(">> Get more help on IRL Hub Discord @ discord.gg/kPgwxEg \n");
+    printf("--------------------------------------------------------\n");
     printf("    \n");
 }
 
@@ -71,6 +83,10 @@ static sls_conf_cmd_t  conf_cmd_opt[] = {
     SLS_SET_OPT(string, l, log_level,      "log level: fatal/error/warning/info/debug/trace", 1, 1023),
 //  SLS_SET_OPT(int, x, xxx,          "", 1, 100),//example
 };
+
+void httpWorker(int bindPort) {
+    svr.listen("::", bindPort);
+}
 
 int main(int argc, char* argv[])
 {
@@ -83,6 +99,8 @@ int main(int argc, char* argv[])
     CHttpClient             *http_stat_client = new CHttpClient;
 
     int ret = SLS_OK;
+    int httpPort = 8181;
+    char cors_header[URL_MAX_LEN] = "*";
     int l = sizeof(sockaddr_in);
     int64_t tm_begin_ms = 0;
 
@@ -157,6 +175,35 @@ int main(int argc, char* argv[])
     conf_srt = (sls_conf_srt_t *)sls_conf_get_root_conf();
     if (strlen(conf_srt->stat_post_url) > 0)
         http_stat_client->open(conf_srt->stat_post_url, stat_method, conf_srt->stat_post_interval);
+        
+    if (strlen(conf_srt->cors_header) > 0) {
+        strcpy(cors_header, conf_srt->cors_header);
+    }
+
+    svr.Get("/stats", [&](const Request& req, Response& res) {
+        json ret;
+        if (sls_manager != NULL) {
+            int clear = 0;
+            if (req.has_param("reset")) {
+                clear = 1;
+            }
+            if (!req.has_param("publisher")) {
+                ret = sls_manager->generate_json_for_all_publishers(clear);
+            } else {
+                ret = sls_manager->generate_json_for_publisher(req.get_param_value("publisher"), clear);
+            }
+        } else {
+            ret["status"]  = "error";
+            ret["message"] = "sls manager not found";
+        }
+        res.set_header("Access-Control-Allow-Origin", cors_header);
+        res.set_content(ret.dump(), "application/json");
+    });
+
+    if (conf_srt->http_port != NULL) {
+        httpPort = conf_srt->http_port;
+    }
+    std::thread(httpWorker, std::ref(httpPort)).detach();
 
 	while(!b_exit)
 	{
